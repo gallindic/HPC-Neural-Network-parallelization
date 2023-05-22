@@ -1,24 +1,30 @@
 #include "mlp.h"
-#include "dataset.h"
+#include "../datasets/dataset.h"
+#include <omp.h>
 
 int main()
 {
     DATASET dataset;
     MLP mlp;
 
-    int hiddenSize = 3;
-    float eta = 0.00000001;
+    int hiddenSize = 7;
+    float eta = 0.0001;
     int batchSize = 64;
-    int epochs = 2;
+    int epochs = 10;
 
-    prepare_dataset("adults/encoded_data_normalized.data", 14, 1, &dataset);
+    prepare_dataset("../datasets/adults/encoded_data_normalized.data", 14, 1, &dataset);
 
     init_mlp(&mlp, dataset.train_set.X, dataset.train_set.size, dataset.train_set.features, dataset.train_set.outputs, hiddenSize);
     // print_mlp_info(&mlp, 10);
 
     printf("Start training...\n");
+    double start_time = omp_get_wtime();
+
     train_mlp(&mlp, dataset.train_set.Y, eta, epochs, batchSize);
-    printf("Training complete...\n");
+
+    double end_time = omp_get_wtime();
+
+    printf("Training complete, time: %.4fs\n", end_time - start_time);
 
     printf("Start testing...\n");
     test_mlp(&mlp, &dataset.test_set);

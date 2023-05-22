@@ -325,6 +325,7 @@ extern "C"
         // Calculate He -> (E◦(1−Yˆ◦2))W2_transpose
         // He ← He ◦ (1 − H◦2)
         matrix_multiply(E_Y_hat_hadamard, W2_transpose, He, batchRows, mlp->outputLayer.nodes, mlp->hiddenLayer.nodes);
+        hadamard_product(He, H_squared_minus_one, He_hadamard, batchRows, mlp->hiddenLayer.nodes);
 
         // Calculate W1_g ← Xb_transpose He
         matrix_multiply(Xb_transpose, He_hadamard, W1_g, mlp->inputLayer.features, batchRows, mlp->hiddenLayer.nodes);
