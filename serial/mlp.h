@@ -10,7 +10,7 @@ extern "C"
 
 #include <stdlib.h>
 #include "math.h"
-#include "dataset.h"
+#include "../datasets/dataset.h"
 
     typedef struct
     {
