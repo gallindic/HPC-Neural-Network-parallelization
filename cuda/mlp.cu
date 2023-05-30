@@ -8,11 +8,14 @@
 #define EPOCHS 10
 
 #define NUM_FEATURES 14 
-#define HIDDEN_SIZE 7
+#define HIDDEN_SIZE 1000
 #define OUTPUTS 1
 
 #define BATCH_SIZE 128
 #define GRID_SIZE 32
+#define BLOCK_SIZE BATCH_SIZE / GRID_SIZE
+
+#define HIDDEN_ROWS_PER_THREAD (HIDDEN_SIZE + BATCH_SIZE - 1) / BATCH_SIZE
 
 __device__ double cuda_tanh_activation(double x) {
     return tanh(x);
@@ -40,7 +43,7 @@ __device__ void calculate_hidden_layer_activation(
 
     for (int i = 0; i < HIDDEN_SIZE; i++)
     {
-        C[(globalIdx * HIDDEN_SIZE) + i] = cuda_tanh_activation(sum[i] + bias[i]);
+        C[i] = cuda_tanh_activation(sum[i] + bias[i]);
     }  
 }
 
@@ -50,97 +53,13 @@ __device__ void calculate_output_layer_activation(
     const double* bias, 
     double* C
 ) {
-    int globalIdx = threadIdx.x + blockIdx.x * blockDim.x;
-
     double sum = 0.0;
 
     for(int i = 0; i < HIDDEN_SIZE; i++) {
-        sum += A[(globalIdx * HIDDEN_SIZE) + i] * weights[i];
+        sum += A[i] * weights[i];
     }
 
-    C[globalIdx] = cuda_tanh_activation(sum + bias[0]);  
-}
-
-__device__ void calculate_one_minus_matrix_squared(double* A, double* B, int cols)
-{
-    int rowId = threadIdx.x + blockIdx.x * blockDim.x;
-
-    for (int i = 0; i < cols; i++)
-    {
-        B[rowId * cols + i] = 1.0 - (A[rowId * cols + i] * A[rowId * cols + i]);
-    }
-}
-
-__device__ void hadamard_product(double *A, double *B, double *C, int cols)
-{
-    int rowId = threadIdx.x + blockIdx.x * blockDim.x;
-    
-    for (int i = 0; i < cols; i++)
-    {
-        C[rowId * cols + i] = A[rowId * cols + i] * B[rowId * cols + i];
-    }
-}
-
-__device__ void matrix_multiply(double *A, double *B, double *C, int m, int n, int p)
-{
-    int rowId = threadIdx.x + blockIdx.x * blockDim.x;
-
-    if (rowId < m) {
-        for (int col = 0; col < p; col++) {
-            double sum = 0.0;
-
-            for (int k = 0; k < n; k++) {
-                sum += A[rowId * n + k] * B[k * p + col];
-            }
-
-            C[rowId * p + col] = sum;
-        }
-    }
-}
-
-__device__ void transpose1DArray(const double* input, double* output, int rows, int cols)
-{
-    int idx = threadIdx.x + blockIdx.x * blockDim.x;
-
-    for (int i = 0; i < cols; i++)
-    {
-        output[i * rows + idx] = input[idx * cols + i];
-    }
-}
-
-__device__ void columnSum(double* A, double* sums, int rows, int cols)
-{
-    int rowId = threadIdx.x + blockIdx.x * blockDim.x;
-
-    if (rowId < cols) {
-        double col_sum = 0.0;
-
-        for (int i = 0; i < rows; i++) {
-            col_sum += A[i * cols + rowId];
-        }
-
-        sums[rowId] = col_sum;
-    }
-}
-
-__device__ void updateWeights(double* W, const double* Wg, int rows, int cols)
-{
-    int globalIdx = threadIdx.x + blockIdx.x * blockDim.x;
-
-    if (globalIdx < rows) {
-        for(int i = 0; i < cols; i++) {
-            W[globalIdx * cols + i] -= ETA * Wg[globalIdx * cols + i];
-        } 
-    }
-}
-
-__device__ void updateBias(double* b, const double* bg, int size)
-{
-    int globalIdx = threadIdx.x + blockIdx.x * blockDim.x;
-
-    if (globalIdx < size) {
-        b[globalIdx] -= ETA * bg[globalIdx];
-    }
+    *C = cuda_tanh_activation(sum + bias[0]);  
 }
 
 __global__ void copy_batch_data(const double* X, const double* Y, double* Xb, double* Yb, int rows, int batch) {
@@ -161,19 +80,19 @@ __global__ void copy_batch_data(const double* X, const double* Y, double* Xb, do
  * Yˆ ← tanh(HW2 + b2)
  */
 __global__ void forward_propagation(double* Xb, double* W1, double* W2, double* b1, double* b2, double* Y_hat_out, double* H_out) {
-    int rowId = threadIdx.x + blockIdx.x * blockDim.x;
+    int globalIdx = threadIdx.x + blockIdx.x * blockDim.x;
 
-    __shared__ double H_local [BATCH_SIZE * HIDDEN_SIZE];
-    __shared__ double Y_hat_local [BATCH_SIZE];
+    double H_local [HIDDEN_SIZE];
+    double Y_hat_local;
     
     calculate_hidden_layer_activation(Xb, W1, b1, H_local);
-    calculate_output_layer_activation(H_local, W2, b2, Y_hat_local);
-
-    Y_hat_out[rowId] = Y_hat_local[rowId];
+    calculate_output_layer_activation(H_local, W2, b2, &Y_hat_local);
 
     for(int i = 0; i < HIDDEN_SIZE; i++) {
-        H_out[rowId * HIDDEN_SIZE + i] = H_local[rowId * HIDDEN_SIZE + i];
+        H_out[globalIdx * HIDDEN_SIZE + i] = H_local[i];
     }
+ 
+    Y_hat_out[globalIdx] = Y_hat_local;
 }
 
 __global__ void calculate_error(double* Yb, double* Y_hat, double* E_out) {
@@ -181,53 +100,102 @@ __global__ void calculate_error(double* Yb, double* Y_hat, double* E_out) {
     E_out[rowId] = Y_hat[rowId] - Yb[rowId];
 }
 
-__global__ void back_propagation(double* Xb, double* Y_hat, double* H, double* E, double* W1, double* W2, double* b1, double* b2) {
-    __shared__ double W2_g_local [HIDDEN_SIZE * OUTPUTS];
-    __shared__ double b2_g_local [OUTPUTS];
+__device__ void transpose1DArray(const double* input, double* output, int rows, int cols)
+{
+    int globalIdx = threadIdx.x + blockIdx.x * blockDim.x;
 
-    __shared__ double W1_g_local [HIDDEN_SIZE * NUM_FEATURES];
-    __shared__ double b1_g_local [HIDDEN_SIZE];
+    for (int i = 0; i < cols; i++) {
+        output[i * rows + threadIdx.x] = input[globalIdx * cols + i];
+    }
+}
 
-    __shared__ double He [BATCH_SIZE * HIDDEN_SIZE];
-    __shared__ double He_hadamard [BATCH_SIZE * HIDDEN_SIZE];
+__device__ void calculate_output_layer_backpropagation(double* Y_hat, double* H_t, double* W2, double* b2)
+{
+    int globalIdx = threadIdx.x + blockIdx.x * blockDim.x;
+    __shared__ float val;
 
-    __shared__ double H_t [BATCH_SIZE * HIDDEN_SIZE];
-    __shared__ double W2_t [NUM_FEATURES * HIDDEN_SIZE];
-    __shared__ double Xb_t [NUM_FEATURES * BATCH_SIZE];
+    if(globalIdx < OUTPUTS) {
+        val = 0.0;
+    }
 
-    __shared__ double H_squared_minus [BATCH_SIZE * HIDDEN_SIZE];
-    __shared__ double Y_hat_squared_minus [BATCH_SIZE];
+    int rowsPerThread = HIDDEN_ROWS_PER_THREAD;
+    int startRow = globalIdx * rowsPerThread;
+    int endRow = min(startRow + rowsPerThread, HIDDEN_SIZE);
+    
+    if(startRow < HIDDEN_SIZE) {
+        int idx = 0;
 
-    __shared__ double E_Y_hat_hadamard [BATCH_SIZE];
+        for(int row = startRow; row < endRow; row++) {
+            for (int col = 0; col < OUTPUTS; col++) {
+                double sum = 0.0;
 
+                for (int k = 0; k < BATCH_SIZE; k++) {
+                    sum += H_t[row * BATCH_SIZE + k * blockIdx.x + k] * Y_hat[k * OUTPUTS + col];
+                }
+
+                W2[globalIdx * HIDDEN_ROWS_PER_THREAD + idx++] -= ETA * sum;
+            }
+        }
+    }
+
+    atomicAdd(&val, (float) Y_hat[globalIdx]);
+
+    __syncthreads();
+
+    if(globalIdx < OUTPUTS) {
+        b2[globalIdx] = val;
+    }
+}
+
+__device__ void calculate_hidden_layer_backpropagation(double* Xb_t, double E_Y_hat_hadamard, double* H, double* W2_t, double* W1, double* b1)
+{
+    int globalIdx = threadIdx.x + blockIdx.x * blockDim.x;
+
+    for (int col = 0; col < HIDDEN_SIZE; col++) {
+        double sum = 0.0;
+
+        for (int k = 0; k < OUTPUTS; k++) {
+            sum += E_Y_hat_hadamard * W2_t[col];
+        }
+
+        double H_squared_minus = 1.0 - (H[globalIdx * HIDDEN_SIZE + col] * H[globalIdx * HIDDEN_SIZE + col]);
+        H[threadIdx.x * HIDDEN_SIZE + col] = sum * H_squared_minus;
+    }
+
+    if(globalIdx < NUM_FEATURES) {
+        for (int col = 0; col < HIDDEN_SIZE; col++) {
+            double sum = 0.0;
+
+            for (int k = 0; k < BATCH_SIZE; k++) {
+                sum += Xb_t[globalIdx * BATCH_SIZE + k] * H[k * HIDDEN_SIZE + col];
+            }
+
+            W1[globalIdx * HIDDEN_SIZE + col] -= ETA * sum;
+        }
+    }
+}
+
+__global__ void back_propagation(double* Xb_t, double* Y_hat, double* H, double* H_t, double* E, double* W1, double* W2, double* W2_t, double* b1, double* b2) {
+    double E_Y_hat_hadamard;
+    double Y_hat_squared_minus;
+    
+    int globalIdx = threadIdx.x + blockIdx.x * blockDim.x;
+
+    Y_hat_squared_minus = 1.0 - (Y_hat[globalIdx] * Y_hat[globalIdx]);
+    E_Y_hat_hadamard = E[globalIdx] * Y_hat_squared_minus;
+    Y_hat[globalIdx] = E_Y_hat_hadamard;
+
+    __syncthreads();
+
+    calculate_output_layer_backpropagation(Y_hat, H_t, W2, b2);
+    calculate_hidden_layer_backpropagation(Xb_t, E_Y_hat_hadamard, H, W2_t, W1, b1);
+}
+
+__global__ void transposeMatrices(double* Xb, double* Xb_t, double* H, double* H_t, double* W2, double* W2_t)
+{
     transpose1DArray(H, H_t, BATCH_SIZE, HIDDEN_SIZE);
     transpose1DArray(W2, W2_t, HIDDEN_SIZE, OUTPUTS);
     transpose1DArray(Xb, Xb_t, BATCH_SIZE, NUM_FEATURES);
-
-    calculate_one_minus_matrix_squared(H, H_squared_minus, HIDDEN_SIZE);
-    calculate_one_minus_matrix_squared(Y_hat, Y_hat_squared_minus, 1);
-
-    hadamard_product(E, Y_hat_squared_minus, E_Y_hat_hadamard, 1);
-    matrix_multiply(H_t, E_Y_hat_hadamard, W2_g_local, HIDDEN_SIZE, BATCH_SIZE, OUTPUTS);
-    
-    matrix_multiply(E_Y_hat_hadamard, W2_t, He, BATCH_SIZE, OUTPUTS, HIDDEN_SIZE);
-    hadamard_product(He, H_squared_minus, He_hadamard, HIDDEN_SIZE);
-
-    matrix_multiply(Xb_t, He_hadamard, W1_g_local, NUM_FEATURES, BATCH_SIZE, HIDDEN_SIZE);
-
-    __syncthreads();
-
-    columnSum(E_Y_hat_hadamard, b2_g_local, BATCH_SIZE, OUTPUTS);
-    columnSum(He_hadamard, b1_g_local, BATCH_SIZE, HIDDEN_SIZE);
-
-    __syncthreads();
-
-    // Update weights & bias
-    updateWeights(W1, W1_g_local, NUM_FEATURES, HIDDEN_SIZE);
-    updateWeights(W2, W2_g_local, HIDDEN_SIZE, OUTPUTS);
-
-    updateBias(b1, b1_g_local, HIDDEN_SIZE);
-    updateBias(b2, b2_g_local, OUTPUTS);
 }
 
 double* flattenDoubleArray(double** arr, int rows, int columns) {
@@ -290,21 +258,26 @@ int main(void) {
     cudaMalloc((void **)&device_Y_hat, BATCH_SIZE * sizeof(double));
     cudaMalloc((void **)&device_H, BATCH_SIZE * HIDDEN_SIZE * sizeof(double));
 
+    double *device_H_t;
+    double *device_W2_t;
+    double *device_Xb_t;
+    cudaMalloc((void **)&device_H_t, BATCH_SIZE * HIDDEN_SIZE * sizeof(double));
+    cudaMalloc((void**)&device_W2_t, sizeof(double) * HIDDEN_SIZE * OUTPUTS);
+    cudaMalloc((void **)&device_Xb_t, NUM_FEATURES * BATCH_SIZE * sizeof(double));
+
     double *device_E;
     cudaMalloc((void **)&device_E, BATCH_SIZE * sizeof(double));
 
     int batches = BATCH_SIZE >= dataset.train_set.size ? 1 : ((dataset.train_set.size + BATCH_SIZE - 1) / BATCH_SIZE);
-    dim3 blockSize(BATCH_SIZE / GRID_SIZE);
     dim3 gridSize(GRID_SIZE);
+    dim3 blockSize(BLOCK_SIZE);
 
-    printf("Batches: %d, Block size: %d, grid size: %d\n", batches, BATCH_SIZE / GRID_SIZE, GRID_SIZE);
+    printf("Batches: %d, Block size: %d, grid size: %d\n", batches, BLOCK_SIZE, GRID_SIZE);
 
     cudaEventRecord(start);
 
     for(int epoch = 1; epoch <= EPOCHS; epoch++) {
         for(int b = 1; b <= batches; b++) {
-            printf("Computing for batch %d\n", b);
-
             copy_batch_data<<<gridSize, blockSize>>>(device_X, device_Y, device_Xb, device_Yb, BATCH_SIZE, b - 1);
             cudaDeviceSynchronize();
 
@@ -314,7 +287,10 @@ int main(void) {
             calculate_error<<<gridSize, blockSize>>>(device_Yb, device_Y_hat, device_E);
             cudaDeviceSynchronize();
 
-            back_propagation<<<gridSize, blockSize>>>(device_X, device_Y_hat, device_H, device_E, deviceW1, deviceW2, deviceB1, deviceB2);
+            transposeMatrices<<<gridSize, blockSize>>>(device_Xb, device_Xb_t, device_H, device_H_t, deviceW2, device_W2_t);
+            cudaDeviceSynchronize();
+
+            back_propagation<<<gridSize, blockSize>>>(device_Xb_t, device_Y_hat, device_H, device_H_t, device_E, deviceW1, deviceW2, device_W2_t, deviceB1, deviceB2);
             cudaDeviceSynchronize();
         }
     }
@@ -324,49 +300,5 @@ int main(void) {
     float dtime = 0;
     cudaEventElapsedTime(&dtime, start, stop);
 
-    printf("Training time: %.4fms\n", dtime);
-
-
-    /*
-    double* Y_hat = (double*)calloc(BATCH_SIZE, sizeof(double));
-    double* E = (double*)calloc(BATCH_SIZE, sizeof(double));
-    double* H = (double*)calloc(BATCH_SIZE * HIDDEN_SIZE, sizeof(double));
-    cudaMemcpy(Y_hat, device_Y_hat, BATCH_SIZE * sizeof(double), cudaMemcpyDeviceToHost);
-    cudaMemcpy(E, device_E, BATCH_SIZE * sizeof(double), cudaMemcpyDeviceToHost);
-    cudaMemcpy(H, device_H, BATCH_SIZE * HIDDEN_SIZE * sizeof(double), cudaMemcpyDeviceToHost);
-
-
-
-    printf("E\n");
-    for(int i = 0; i < BATCH_SIZE; i++) {
-        printf("%f \n", E[i]);
-    }
-
-    printf("Y_hat\n");
-    for(int i = 0; i < BATCH_SIZE; i++) {
-        printf("%f \n", Y_hat[i]);
-    }
-
-    printf("\n\nH\n");
-    for(int i = 0; i < BATCH_SIZE; i++) {
-        for(int j = 0; j < HIDDEN_SIZE; j++) {
-            printf("%f ", H[i * HIDDEN_SIZE + j]);
-        }
-
-        printf("\n");
-    }
-
-    double* Xb = (double*)calloc(NUM_FEATURES * BATCH_SIZE, sizeof(double));
-    double* Yb = (double*)calloc(BATCH_SIZE, sizeof(double));
-
-    cudaMemcpy(Xb, device_Xb, NUM_FEATURES * BATCH_SIZE *  sizeof(double), cudaMemcpyDeviceToHost);
-    cudaMemcpy(Yb, device_Yb, BATCH_SIZE * sizeof(double), cudaMemcpyDeviceToHost);
-
-    for(int i = 0; i < BATCH_SIZE; i++) {
-        for(int j = 0; j < NUM_FEATURES; j++) {
-            printf("%f ", Xb[i * NUM_FEATURES + j]);
-        }
-
-        printf("Y= %f\n", Yb[i]);
-    }*/
+    printf("Training time: %fms\n", dtime);
 }
