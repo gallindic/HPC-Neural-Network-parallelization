@@ -482,25 +482,25 @@ double ** calculate_one_minus_matrix_mpi(double** A, int rows, int cols, int myi
 //     double **H;
 //     H = calculate_layer_activation_mpi(M, N, bias, H, rowsM, colsM, colsN, myid, procs);
 //     // Y_hat <- tanh(H * W_2 + b_2)
-//     double **Y_hat;
-//     Y_hat = calculate_layer_activation_mpi(M, N, bias, Y_hat, rowsM, colsM, colsN, myid, procs);
+//     // double **Y_hat;
+//     // Y_hat = calculate_layer_activation_mpi(M, N, bias, Y_hat, rowsM, colsM, colsN, myid, procs);
 
 
 //     //** Back propagation
 //     // E <- Y_hat + Y_b
-//     double **E;
-//     E = calculate_error_mpi(H, Y_hat, rowsM, colsM, myid, procs);
+//     // double **E;
+//     // E = calculate_error_mpi(H, Y_hat, rowsM, colsM, myid, procs);
 //     // W_2g <- H_t * (E ° (1 - Y_hat_squared))
 //     // Transposed
 //     //double **M_transposed;
 //     //M_transposed = transpose_mpi(M, rowsM, colsM, myid, procs); // Transpose H
 //     //M_transposed = _transpose_matrix_(M, rowsM, colsM); // Transpose H
 //     // Squared
-//     double **M_squared;
-//     M_squared = square_mpi(M, rowsM, colsM, myid, procs);
+//     // double **M_squared;
+//     // M_squared = square_mpi(M, rowsM, colsM, myid, procs);
 //     // One minus matrix
-//     double **one_minus_M;
-//     one_minus_M = calculate_one_minus_matrix_mpi(M, rowsM, colsM, myid, procs);
+//     // double **one_minus_M;
+//     // one_minus_M = calculate_one_minus_matrix_mpi(M, rowsM, colsM, myid, procs);
 
      
 //     MPI_Barrier(MPI_COMM_WORLD);
@@ -508,7 +508,7 @@ double ** calculate_one_minus_matrix_mpi(double** A, int rows, int cols, int myi
 //         //print_matrix_double(H, colsM, colsN, "H");
 //         //print_matrix_double(M_transposed, colsM, rowsM, "M_transposed");
 //         //print_matrix_double(E, colsM, colsN, "E");
-//         print_matrix_double(one_minus_M, rowsM, colsM, "One minus M");
+//         print_matrix_double(H, rowsM, colsM, "H");
 //     }
 //     if(myid == MASTER){
 //         double end_time = MPI_Wtime();
@@ -535,27 +535,28 @@ double ** calculate_one_minus_matrix_mpi(double** A, int rows, int cols, int myi
 
 void train_mlp_mpi(MLP* mlp, double* Y, float eta, int epochs, int batchSize, Data* test_set, int myid, int procs) {
     int batches = batchSize >= mlp->inputLayer.samples ? 1 : (mlp->inputLayer.samples / batchSize);
-    printf("train_mlp_mpi(): Batches num: %d\n", batches);
+    if (myid == MASTER) printf("train_mlp_mpi(): Batches num: %d\n", batches);
 
-    if (myid == MASTER) {
-        // Allocate memory for intermediate matrices and vectors
-        double** Xb = (double**)malloc(batchSize * sizeof(double*));
-        double** Yb = (double**)malloc(batchSize * sizeof(double*));
+    // Allocate memory for intermediate matrices and vectors
+    double** Xb = (double**)malloc(batchSize * sizeof(double*));
+    double** Yb = (double**)malloc(batchSize * sizeof(double*));
 
-        for (int i = 0; i < batchSize; i++) {
-            Xb[i] = (double*)malloc(mlp->inputLayer.features * sizeof(double));
-            Yb[i] = (double*)malloc(sizeof(double));
-        }
-
-        printf("train_mlp_mpi(): matrices initialized\n");
-        test_mlp(mlp, test_set);
-        printf("\n");
+    for (int i = 0; i < batchSize; i++) {
+        Xb[i] = (double*)malloc(mlp->inputLayer.features * sizeof(double));
+        Yb[i] = (double*)malloc(sizeof(double));
     }
 
+    if (myid == MASTER) {
+        printf("train_mlp_mpi(): matrices initialized\n");
+        test_mlp(mlp, test_set);
+    }
+    
+    // MPI_Barrier(MPI_COMM_WORLD);
+
     for (int epoch = 1; epoch <= epochs; epoch++) {
-        printf("Epoch: %d\n", epoch);
-        for (int b = 1; b <= batches; b++) {
-            printf("Batch: %d\n", b);
+        if (myid == MASTER) printf("\nEpoch: %d\n", epoch);
+        for (int b = 1; b <= 1; b++) {
+            if (myid == MASTER) printf("Batch: %d\n", b);
 
             int batchStart = (b - 1) * batchSize;
             int batchEnd = b * batchSize - 1;
@@ -563,9 +564,19 @@ void train_mlp_mpi(MLP* mlp, double* Y, float eta, int epochs, int batchSize, Da
             if (batchEnd >= mlp->inputLayer.samples) {
                 batchEnd = mlp->inputLayer.samples - 1;
             }
-            copy_batch_data(Xb, Yb, Y, mlp, batchStart, batchEnd);
+            // copy_batch_data(Xb, Yb, Y, mlp, batchStart, batchEnd);
+            if (myid == MASTER) {
+                Xb = alloc_2d_double(batchSize, NUM_FEATURES);
+                for (int i = 0; i < batchSize; i++) {
+                    for (int j = 0; j < NUM_FEATURES; j++) {
+                        Xb[i][j] = mlp->inputLayer.X[i][j];
+                    }
+                }
+            }
+            MPI_Bcast(&Xb, sizeof(Xb), MPI_BYTE, MASTER, MPI_COMM_WORLD);
 
-            // Forward propagation
+
+            // // Forward propagation
             double** H;
             if (myid == MASTER) {
                 printf("Xb:\n");
@@ -588,16 +599,16 @@ void train_mlp_mpi(MLP* mlp, double* Y, float eta, int epochs, int batchSize, Da
                 myid,
                 procs);
 
-            double** Y_hat;
-            Y_hat = calculate_layer_activation_mpi(H,
-                mlp->outputLayer.W2,
-                mlp->outputLayer.b2,
-                Y_hat,
-                batchSize,
-                mlp->hiddenLayer.nodes,
-                mlp->outputLayer.nodes,
-                myid,
-                procs);
+            // double** Y_hat;
+            // Y_hat = calculate_layer_activation_mpi(H,
+            //     mlp->outputLayer.W2,
+            //     mlp->outputLayer.b2,
+            //     Y_hat,
+            //     batchSize,
+            //     mlp->hiddenLayer.nodes,
+            //     mlp->outputLayer.nodes,
+            //     myid,
+            //     procs);
         }
         if (myid == MASTER) {
             test_mlp(mlp, test_set);
@@ -617,16 +628,19 @@ int main(int argc, char** argv) {
     MPI_Comm_size(MPI_COMM_WORLD, &procs);
 
     int batchSize = procs;
-    int rowsPerProcess, batches, remainingRows;
+    int rowsPerProcess, remainingRows;
 
     // Prepare dataset in the root process
     if(myid == MASTER) {
-        prepare_dataset("../datasets/adults/encoded_data_small.data", NUM_FEATURES, OUTPUTS, &dataset);  
+        prepare_dataset("../datasets/adults/encoded_data.data", NUM_FEATURES, OUTPUTS, &dataset);  
         init_mlp(&mlp, dataset.train_set.X, dataset.train_set.size, NUM_FEATURES, OUTPUTS, HIDDEN_SIZE);
         //print_matrix_double(dataset.train_set.X, dataset.train_set.size, NUM_FEATURES, "Dataset");
         printf("Start training...\n");
 
     }
+
+    MPI_Bcast(&dataset, sizeof(DATASET), MPI_BYTE, MASTER, MPI_COMM_WORLD);
+    MPI_Bcast(&mlp, sizeof(MLP), MPI_BYTE, MASTER, MPI_COMM_WORLD);
 
     train_mlp_mpi(&mlp, dataset.train_set.Y, ETA, EPOCHS, batchSize, &dataset.test_set, myid, procs);
 
