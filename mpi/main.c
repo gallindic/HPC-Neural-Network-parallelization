@@ -53,16 +53,6 @@ double **alloc_2d_double(int rows, int cols) {
     return array;
 }
 
-double** transpose_2d_double(double** mat, int rows, int cols) {
-    double** transposed = alloc_2d_double(rows, cols);    
-    for(int i = 0; i < rows; i++) {
-        for(int j = 0; j < cols; j++) {
-            transposed[j][i] = mat[i][j];
-        }
-    }
-    return transposed;
-}
-
 void distribute_matrix(double ***M, int *rows, int cols, int * offset_rows, int myid, int procs){
     MPI_Status  status;
     
@@ -92,9 +82,6 @@ void distribute_matrix(double ***M, int *rows, int cols, int * offset_rows, int 
             displs[i] = displs[i-1] + sendcounts[i-1];
         }    
     }
-    //for(int i = 0; i < procs; i++){
-    //    printf("displs[%d] = %d, sendcounts[%d] = %d\n", i, displs[i], i, sendcounts[i]);
-    //}
 
     int recvbuf_length = sendcounts[myid];
     *offset_rows = displs[myid] / rows[0];
@@ -326,21 +313,23 @@ double ** calculate_error_mpi(double **Y, double **Y_hat, int rows, int cols, in
     return finalE;
 }
 
-double ** _transpose_matrix_(double **A, int rows, int cols){
-    int i,j,k;
-    double **A_transposed = alloc_2d_double(rows, cols);
-    for(i = 0; i < rows; i++){
-        for(j = 0; j < cols; j++){                                                
-            A_transposed[i][j] = A[j][i];
+double ** _transpose_matrix_(double **A, int rows, int cols, int myid){
+    double **A_transposed = alloc_2d_double(cols, rows);
+    for(int i = 0; i < rows; i++){
+        for(int j = 0; j < cols; j++){   
+            A_transposed[j][i] = A[i][j];
         }
     }
+    printf("Rank: %d, rows: %d, cols: %d", myid, rows, cols);
+    print_matrix_double(A_transposed, cols, rows, "A_transposed");
     return A_transposed;
 }
 
 double ** transpose_mpi(double **A, int rows, int cols, int myid, int procs) {
    double ** finalTransposed;
     if(myid == MASTER){
-        finalTransposed = alloc_2d_double(rows, cols);
+        printf("Global dimenssions: %d rows, %d cols\n", rows, cols);
+        finalTransposed = alloc_2d_double(cols, rows);
     } else {
         finalTransposed = NULL;
     } 
@@ -349,7 +338,7 @@ double ** transpose_mpi(double **A, int rows, int cols, int myid, int procs) {
     
     distribute_matrix(&A, &rows, cols, &offset_rows, myid, procs);    
     
-    double ** A_transposed = _transpose_matrix_(A, rows, cols);
+    double ** A_transposed = _transpose_matrix_(A, rows, cols, myid);
     
     MPI_Barrier(MPI_COMM_WORLD);
                
@@ -360,6 +349,78 @@ double ** transpose_mpi(double **A, int rows, int cols, int myid, int procs) {
     }
     
     return finalTransposed;
+}
+
+double ** _square_matrix_(double **A, int rows, int cols){
+    double **A_squared = alloc_2d_double(rows, cols);
+    for(int i = 0; i < rows; i++){
+        for(int j = 0; j < cols; j++){                                               
+            A_squared[i][j] = A[i][j] * A[i][j];
+        }
+    }
+    return A_squared;
+}
+
+double ** square_mpi(double** A, int rows, int cols, int myid, int procs){
+    
+    double ** finalSquared;
+    if(myid == MASTER){
+        finalSquared = alloc_2d_double(rows, cols);
+    } else {
+        finalSquared = NULL;
+    } 
+    int offset_rows;
+        
+    distribute_matrix(&A, &rows, cols, &offset_rows, myid, procs);    
+        
+    double **squared = _square_matrix_(A, rows, cols);    
+    
+    MPI_Barrier(MPI_COMM_WORLD);    
+    
+    if(myid == MASTER){
+        MPI_Gather(&squared[0][0], rows*cols, MPI_DOUBLE, &finalSquared[0][0], rows*cols, MPI_DOUBLE, MASTER, MPI_COMM_WORLD);
+    } else {
+        MPI_Gather(&squared[0][0], rows*cols, MPI_DOUBLE, NULL, rows*cols, MPI_DOUBLE, MASTER, MPI_COMM_WORLD);
+    }
+    
+    return finalSquared;
+
+}
+
+double ** _one_minus_matrix_(double **A, int rows, int cols){
+    double **one_minus_matrix = alloc_2d_double(rows, cols);
+    for(int i = 0; i < rows; i++){
+        for(int j = 0; j < cols; j++){                                               
+            one_minus_matrix[i][j] = 1 - A[i][j];
+        }
+    }
+    return one_minus_matrix;
+}
+
+double ** calculate_one_minus_matrix_mpi(double** A, int rows, int cols, int myid, int procs){
+    
+    double ** finalMatrix;
+    if(myid == MASTER){
+        finalMatrix = alloc_2d_double(rows, cols);
+    } else {
+        finalMatrix = NULL;
+    } 
+    int offset_rows;
+        
+    distribute_matrix(&A, &rows, cols, &offset_rows, myid, procs);    
+        
+    double **matrix = _one_minus_matrix_(A, rows, cols);    
+    
+    MPI_Barrier(MPI_COMM_WORLD);    
+    
+    if(myid == MASTER){
+        MPI_Gather(&matrix[0][0], rows*cols, MPI_DOUBLE, &finalMatrix[0][0], rows*cols, MPI_DOUBLE, MASTER, MPI_COMM_WORLD);
+    } else {
+        MPI_Gather(&matrix[0][0], rows*cols, MPI_DOUBLE, NULL, rows*cols, MPI_DOUBLE, MASTER, MPI_COMM_WORLD);
+    }
+    
+    return finalMatrix;
+
 }
 
 
@@ -401,11 +462,11 @@ int main(int argc, char* argv[])
             }
         }
         print_matrix_double(M, rowsM, colsM,"M");
-        printf("\nbias: \n");
-        for(int i = 0; i < colsM; i++){
-           printf("%f\n", bias[i]);
-        }
-        print_matrix_double(M, colsM, colsN, "N");
+        // printf("\nbias: \n");
+        // for(int i = 0; i < colsM; i++){
+        //    printf("%f\n", bias[i]);
+        // }
+        // print_matrix_double(M, colsM, colsN, "N");
     }
 
     double start_time = omp_get_wtime();
@@ -429,15 +490,24 @@ int main(int argc, char* argv[])
     double **E;
     E = calculate_error_mpi(H, Y_hat, rowsM, colsM, myid, procs);
     // W_2g <- H_t * (E ° (1 - Y_hat_squared))
-    double **H_transposed;
-    H_transposed = transpose_mpi(M, rowsM, colsM, myid, procs); // Transpose H
+    // Transposed
+    //double **M_transposed;
+    //M_transposed = transpose_mpi(M, rowsM, colsM, myid, procs); // Transpose H
+    //M_transposed = _transpose_matrix_(M, rowsM, colsM); // Transpose H
+    // Squared
+    double **M_squared;
+    M_squared = square_mpi(M, rowsM, colsM, myid, procs);
+    // One minus matrix
+    double **one_minus_M;
+    one_minus_M = calculate_one_minus_matrix_mpi(M, rowsM, colsM, myid, procs);
 
      
     MPI_Barrier(MPI_COMM_WORLD);
     if(myid == MASTER) {
-        print_matrix_double(H, colsM, colsN, "H");
-        print_matrix_double(H_transposed, colsM, colsN, "M_transposed");
+        //print_matrix_double(H, colsM, colsN, "H");
+        //print_matrix_double(M_transposed, colsM, rowsM, "M_transposed");
         //print_matrix_double(E, colsM, colsN, "E");
+        print_matrix_double(one_minus_M, rowsM, colsM, "One minus M");
     }
     double end_time = omp_get_wtime();
     if(myid == MASTER){
@@ -449,10 +519,14 @@ int main(int argc, char* argv[])
     //    print_matrix_double(C,rows, cols,"C final");
     //}
 
-    //if(myid == MASTER){
-    //    free_2d_double(M, rows);
-    //    free_2d_double(N, rows);
-    //} 
+    // if(myid == MASTER){
+    //    free_2d_double(M, rowsM);
+    //    free_2d_double(N, rowsM);
+    //    free_2d_double(H, rowsM);
+    //    free_2d_double(Y_hat, rowsM);
+    //    free_2d_double(E, rowsM);
+    //    free_2d_double(H_transposed, rowsM);
+    // } 
 	MPI_Finalize();
     
 	return 0;
